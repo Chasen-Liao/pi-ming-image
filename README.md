@@ -23,11 +23,8 @@ registered as chat models, so they do not appear in Pi's model list.
 Install the matching tagged GitHub release globally (writes `~/.pi/agent/settings.json`):
 
 ```bash
-pi install git:github.com/Chasen-Liao/pi-ming-image@v0.1.1
+pi install git:github.com/Chasen-Liao/pi-ming-image@v0.2.0
 ```
-
-The bundled Skill is part of the upcoming `v0.2.0` package. Until that tag is published,
-the command above installs the public `v0.1.1` tool-only release.
 
 The package is **not on npm yet** — `pi install npm:pi-ming-image` will 404 until it is
 published. The `files` and `license` fields in `package.json` are in place for that step.
@@ -42,8 +39,8 @@ Project packages load only after you grant project trust. Restart Pi or run `/re
 after installing. A local package is identified by its resolved absolute path, so the
 same directory cannot load twice through different declarations.
 
-After `v0.2.0` is installed, Pi discovers both bundled Skills from the same package.
-They can be selected automatically or invoked explicitly:
+Pi discovers both bundled Skills from the same package. They can be selected
+automatically or invoked explicitly:
 
 ```text
 /skill:ling-ui-design design a vivid 9:16 poster and keep the main character prominent
