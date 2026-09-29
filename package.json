@@ -1,7 +1,7 @@
 {
   "name": "pi-ming-image",
-  "version": "0.1.1",
-  "description": "Pi package exposing Ming image generation (design + layer decomposition) on OpenRouter as a slash command and an agent tool.",
+  "version": "0.2.0",
+  "description": "Pi package exposing Ming image generation and layer decomposition on OpenRouter, with a bundled visual-design skill.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,16 @@
   },
   "files": [
     "extensions/",
-    "lib/"
+    "lib/",
+    "skills/ling-ui-design/SKILL.md",
+    "skills/ling-ui-design/LICENSE",
+    "skills/ling-ui-design/README.md",
+    "skills/ling-ui-design/pyproject.toml",
+    "skills/ling-ui-design/pyrightconfig.json",
+    "skills/ling-ui-design/.env.example",
+    "skills/ling-ui-design/references/",
+    "skills/ling-ui-design/scripts/",
+    "skills/image-to-editable-ppt/"
   ],
   "keywords": [
     "pi-package"
@@ -18,6 +27,10 @@
   "pi": {
     "extensions": [
       "./extensions/index.ts"
+    ],
+    "skills": [
+      "./skills/ling-ui-design",
+      "./skills/image-to-editable-ppt"
     ]
   },
   "scripts": {

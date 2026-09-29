@@ -3,7 +3,10 @@
 A [Pi](https://github.com/earendil-works/pi) package that calls the Ming image models on
 OpenRouter for text-to-image generation and single-image layer decomposition.
 
-Both entry points share one implementation and one request path.
+Both entry points share one implementation and one request path. The package also
+bundles two Agent Skills wired to the `generate_ming_image` tool: an adaptation of
+inclusionAI's official `ling-ui-design`, plus `image-to-editable-ppt` for rebuilding a
+flat slide image as an editable PowerPoint slide.
 
 ## What it does
 
@@ -23,6 +26,9 @@ Install the matching tagged GitHub release globally (writes `~/.pi/agent/setting
 pi install git:github.com/Chasen-Liao/pi-ming-image@v0.1.1
 ```
 
+The bundled Skill is part of the upcoming `v0.2.0` package. Until that tag is published,
+the command above installs the public `v0.1.1` tool-only release.
+
 The package is **not on npm yet** — `pi install npm:pi-ming-image` will 404 until it is
 published. The `files` and `license` fields in `package.json` are in place for that step.
 
@@ -35,6 +41,14 @@ pi -e .
 Project packages load only after you grant project trust. Restart Pi or run `/reload`
 after installing. A local package is identified by its resolved absolute path, so the
 same directory cannot load twice through different declarations.
+
+After `v0.2.0` is installed, Pi discovers both bundled Skills from the same package.
+They can be selected automatically or invoked explicitly:
+
+```text
+/skill:ling-ui-design design a vivid 9:16 poster and keep the main character prominent
+/skill:image-to-editable-ppt recreate this slide image as one editable PowerPoint slide
+```
 
 Remove it with `pi remove <source> [-l]`, using the same source and scope you installed with.
 The `artifacts/` output and locally generated `.pi/settings.json` are Git-ignored.
