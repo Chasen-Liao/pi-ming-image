@@ -1,9 +1,17 @@
 {
   "name": "pi-ming-image",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.1.1",
   "description": "Pi package exposing Ming image generation (design + layer decomposition) on OpenRouter as a slash command and an agent tool.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Chasen-Liao/pi-ming-image.git"
+  },
+  "files": [
+    "extensions/",
+    "lib/"
+  ],
   "keywords": [
     "pi-package"
   ],

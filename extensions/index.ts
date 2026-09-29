@@ -23,9 +23,16 @@ function describeFailure(error: unknown): string {
 function describeSuccess(result: GenerateSuccess): string {
 	const cost = (result.usage as { cost?: unknown } | undefined)?.cost;
 	const costText = typeof cost === "number" ? `, cost ${cost}` : "";
+	const previewNote =
+		result.previewFiles.length > 0
+			? `  inspect these small previews instead of the full-size files:\n${result.previewFiles
+					.map((name) => `    ${result.outputDir}/${name}`.replace(/\\/g, "/"))
+					.join("\n")}`
+			: "";
 	return [
 		`${result.task}: ${result.files.length} image(s) in ${result.outputDir}`,
 		...result.files.map((file) => `  ${file}`),
+		previewNote,
 		`manifest: ${result.manifestPath}`,
 		`elapsed: ${result.elapsedSeconds}s${costText}`,
 		result.task === "layer" ? "Inspect every layer: the model decides how many it returns and they may not match the request." : "",
@@ -35,11 +42,12 @@ function describeSuccess(result: GenerateSuccess): string {
 }
 
 export default function mingImageExtension(pi: ExtensionAPI) {
-	const run = async (ctx: ExtensionContext, label: string, action: () => Promise<GenerateSuccess>) => {
+	const run = async (ctx: ExtensionContext, label: string, action: (report: (message: string) => void) => Promise<GenerateSuccess>) => {
 		ctx.ui.notify(`${label}…`, "info");
 		try {
-			const result = await action();
-			ctx.ui.notify(describeSuccess(result), "success");
+			const result = await action((message) => ctx.ui.notify(message, "info"));
+			// ctx.ui.notify has no "success" level; anything else renders as unknown.
+			ctx.ui.notify(describeSuccess(result), "info");
 		} catch (error) {
 			ctx.ui.notify(describeFailure(error), "error");
 		}
@@ -53,7 +61,9 @@ export default function mingImageExtension(pi: ExtensionAPI) {
 			'task "design": text-to-image from the prompt alone. Use it for new artwork, mockups, and visual concepts.',
 			'task "layer": decompose the ONE local PNG/JPEG/WebP named by imagePath into transparent layers. imagePath is required.',
 			"UPLOAD NOTICE: task=layer sends the file at imagePath to OpenRouter. Only pass images the user has allowed to be uploaded.",
-			"Returns saved file paths. The layer count and roles are decided by the model and may not match the prompt; always inspect the saved files.",
+			"Generation takes one to several minutes against a single request; the result line reports progress while it waits.",
+			"To inspect the output, read the small files listed under previews. The full-size files are megabytes each and reading them floods your context, so read those only when you need exact pixels.",
+			"The layer count and roles are decided by the model and may not match the prompt; always inspect the previews.",
 		].join(" "),
 		promptSnippet: "generate_ming_image: text-to-image (design) or image layer decomposition (layer)",
 		parameters: Type.Object({
@@ -65,7 +75,7 @@ export default function mingImageExtension(pi: ExtensionAPI) {
 				Type.String({ description: "Local image for task=layer. Required for layer, rejected for design." }),
 			),
 		}),
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			// Arguments are passed to the model, so validate before spending a request.
 			if (params.task === "layer" && !params.imagePath) {
 				throw new MingImageError("invalid_input", "task=layer requires imagePath.");
@@ -84,6 +94,10 @@ export default function mingImageExtension(pi: ExtensionAPI) {
 				cwd: ctx.cwd,
 				signal,
 				tokenSource: ctx.modelRegistry,
+				// A silent multi-minute wait reads as a hang, so stream the stages.
+				onProgress: onUpdate
+					? (message) => onUpdate({ content: [{ type: "text", text: message }], details: { progress: message } })
+					: undefined,
 			});
 			// Paths and counts only; image bytes stay on disk.
 			return { content: [{ type: "text", text: describeSuccess(result) }], details: result };
@@ -110,7 +124,7 @@ export default function mingImageExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			await run(ctx, `/ming-image ${parsed.task}`, async () =>
+			await run(ctx, `/ming-image ${parsed.task}`, (report) =>
 				generateMingImage({
 					task: parsed.task,
 					prompt,
@@ -122,6 +136,7 @@ export default function mingImageExtension(pi: ExtensionAPI) {
 					// a private controller here would be dead code, not a feature.
 					signal: ctx.signal,
 					tokenSource: ctx.modelRegistry,
+					onProgress: report,
 				}),
 			);
 		},

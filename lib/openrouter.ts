@@ -89,6 +89,15 @@ function statusToError(status: number, detail: string | undefined): MingImageErr
 	);
 }
 
+/** Release an unread body so the underlying connection is not left half-open. */
+async function discardResponseBody(response: Response): Promise<void> {
+	try {
+		await response.body?.cancel();
+	} catch {
+		// Already consumed, already errored, or nothing to release.
+	}
+}
+
 async function readBoundedBody(response: Response, limit: number, label: string): Promise<Uint8Array> {
 	const reader = response.body?.getReader();
 	if (!reader) return new Uint8Array();
@@ -179,6 +188,9 @@ export async function requestImages(options: RequestOptions): Promise<RequestRes
 		// base64 inflates by 4/3, so allow for that plus JSON framing.
 		const declared = Number(response.headers?.get?.("content-length") ?? NaN);
 		if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+			// The body is never read on this path, so it has to be released
+			// explicitly or the connection stays half-open in the fetch pool.
+			await discardResponseBody(response);
 			throw new MingImageError(
 				"bad_response",
 				`OpenRouter response is ${formatBytes(declared)}; the limit is ${formatBytes(MAX_RESPONSE_BYTES)}.`,

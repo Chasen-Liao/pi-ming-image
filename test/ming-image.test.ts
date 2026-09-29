@@ -11,6 +11,7 @@ import { buildRequestBody, requestImages } from "../lib/openrouter.ts";
 import { MingImageError } from "../lib/errors.ts";
 import { readPromptFile, sniffImageMime } from "../lib/validate.ts";
 import { MAX_OUTPUT_IMAGES, MAX_PROMPT_CHARS } from "../lib/types.ts";
+import { photoPng } from "./fixtures.ts";
 
 /** Minimal valid PNG (1x1, transparent) reused across tests. */
 const PNG_1X1 = Buffer.from(
@@ -43,13 +44,13 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 /** Fetch double that records the request and replays a scripted response. */
-function stubFetch(responses: Response[] | ((url: string, init: RequestInit) => Response)) {
+function stubFetch(responses: Response[] | ((url: string, init: RequestInit) => Response | Promise<Response>)) {
 	const calls: { url: string; init: RequestInit }[] = [];
 	const impl = (async (url: string | URL | Request, init?: RequestInit) => {
 		const requestInit = init ?? {};
 		calls.push({ url: String(url), init: requestInit });
 		return typeof responses === "function"
-			? responses(String(url), requestInit)
+			? await responses(String(url), requestInit)
 			: (responses.shift() as Response);
 	}) as unknown as typeof fetch;
 	return { impl, calls };
@@ -61,6 +62,10 @@ function okImageResponse(count = 1, mime = "image/png") {
 		data: Array.from({ length: count }, () => ({ b64_json: bytes.toString("base64") })),
 		usage: { total_tokens: 42, cost: 0 },
 	});
+}
+
+function imageResponseFrom(buffer: Buffer, count = 1) {
+	return jsonResponse({ data: Array.from({ length: count }, () => ({ b64_json: buffer.toString("base64") })) });
 }
 
 after(async () => {
@@ -439,6 +444,33 @@ describe("requestImages", () => {
 		);
 	});
 
+	it("releases an unread body when a declared-oversize response is rejected", async () => {
+		// Rejecting on content-length skips the read, so the body has to be
+		// cancelled explicitly or the connection stays half-open in the pool.
+		let cancelled = false;
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new Uint8Array([1, 2, 3]));
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+		const { impl } = stubFetch([
+			{
+				ok: true,
+				status: 200,
+				headers: new Headers({ "content-length": String(512 * 1024 * 1024) }),
+				body: stream,
+			} as unknown as Response,
+		]);
+		await assert.rejects(
+			() => requestImages({ ...base, task: "design", fetchImpl: impl }),
+			(error: MingImageError) => error.code === "bad_response",
+		);
+		assert.equal(cancelled, true, "an unread oversized body must be released");
+	});
+
 	it("still reports upstream errors, not timeouts, on a fast failure", async () => {
 		const { impl } = stubFetch([new Response("nope", { status: 503 })]);
 		await assert.rejects(
@@ -539,7 +571,7 @@ describe("output directories", () => {
 		};
 		await assert.rejects(
 			() => writeRun(dir, [image], {
-				task: "design", model: "m", prompt: "p", output_files: [], elapsed_seconds: 1,
+				task: "design", model: "m", prompt: "p", output_files: [], preview_files: [], elapsed_seconds: 1,
 				created_at: new Date().toISOString(),
 			}, controller.signal),
 			(error: MingImageError) => error.code === "cancelled",
@@ -558,12 +590,91 @@ describe("output directories", () => {
 				model: "m",
 				prompt: "p",
 				output_files: [],
+				preview_files: [],
 				elapsed_seconds: 1,
 				created_at: new Date().toISOString(),
 			}),
 			(error: MingImageError) => error.code === "write_failed",
 		);
 		await assert.rejects(() => readFile(path.join(dir, "manifest.json")), /ENOENT/);
+	});
+
+	it("writes a preview beside each PNG and records it in the manifest", async () => {
+		const cwd = await scratch();
+		const dir = await allocateOutputDir(cwd, "design");
+		const full = photoPng();
+		const written = await writeRun(
+			dir,
+			[{ bytes: new Uint8Array(full), mime: "image/png" }],
+			{
+				task: "design",
+				model: "m",
+				prompt: "p",
+				output_files: [],
+				preview_files: [],
+				elapsed_seconds: 1,
+				created_at: new Date().toISOString(),
+			},
+		);
+
+		assert.deepEqual(written.files, ["design_01.png"]);
+		assert.deepEqual(written.previewFiles, ["previews/design_01.png"]);
+
+		// The preview must not shadow a `layer_*.png` glob that downstream
+		// scripts run against the run directory.
+		const { readdir } = await import("node:fs/promises");
+		assert.deepEqual(await readdir(dir), ["design_01.png", "manifest.json", "previews"]);
+
+		const preview = await readFile(path.join(dir, "previews", "design_01.png"));
+		assert.ok(
+			preview.length * 2 < full.length,
+			`preview ${preview.length}B must be well under the ${full.length}B source`,
+		);
+		assert.equal(sniffImageMime(new Uint8Array(preview)), "image/png");
+
+		const manifest = JSON.parse(await readFile(written.manifestPath, "utf8"));
+		assert.deepEqual(manifest.preview_files, ["previews/design_01.png"]);
+		await discardOutputDir(dir);
+	});
+
+	it("keeps the run when a preview cannot be produced", async () => {
+		const cwd = await scratch();
+		const dir = await allocateOutputDir(cwd, "layer");
+
+		// JPEG has no preview: the package carries no JPEG decoder by design.
+		const jpegRun = await writeRun(
+			dir,
+			[{ bytes: new Uint8Array(JPEG_1X1), mime: "image/jpeg" }],
+			{
+				task: "layer",
+				model: "m",
+				prompt: "p",
+				output_files: [],
+				preview_files: [],
+				elapsed_seconds: 1,
+				created_at: new Date().toISOString(),
+			},
+		);
+		assert.deepEqual(jpegRun.previewFiles, []);
+		assert.deepEqual(jpegRun.files, ["layer_01.jpg"]);
+
+		// A 1x1 PNG has no meaningful preview, but the run still succeeds.
+		const tinyRun = await writeRun(
+			dir,
+			[{ bytes: new Uint8Array(PNG_1X1), mime: "image/png" }],
+			{
+				task: "layer",
+				model: "m",
+				prompt: "p",
+				output_files: [],
+				preview_files: [],
+				elapsed_seconds: 1,
+				created_at: new Date().toISOString(),
+			},
+		);
+		assert.deepEqual(tinyRun.files, ["layer_01.png"]);
+		await assert.rejects(() => readFile(path.join(dir, "previews", "layer_01.png")), /ENOENT/);
+		await discardOutputDir(dir);
 	});
 });
 
@@ -735,5 +846,84 @@ describe("generateMingImage", () => {
 			(error: MingImageError) => error.code === "missing_credential",
 		);
 		assert.equal(calls.length, 0);
+	});
+});
+
+describe("progress reporting", () => {
+	const token = { token: "sk-test-not-a-real-token" };
+
+	async function workspace() {
+		const cwd = await mkdtemp(path.join(tmpdir(), "ming-image-progress-"));
+		scratchDirs.push(cwd);
+		await writeFile(path.join(cwd, "board.png"), photoPng(120, 90));
+		return cwd;
+	}
+
+	it("reports each stage so a multi-minute call is never silent", async () => {
+		const cwd = await workspace();
+		const messages: string[] = [];
+		const { impl } = stubFetch([imageResponseFrom(photoPng())]);
+		await generateMingImage({
+			task: "design",
+			prompt: "a calm hero",
+			cwd,
+			fetchImpl: impl,
+			onProgress: (message) => messages.push(message),
+			...token,
+		});
+
+		assert.ok(messages.length >= 4, `only reported ${messages.length} stage(s)`);
+		assert.match(messages[0], /validating input/);
+		assert.ok(messages.some((m) => /requesting inclusionai\/ming-image/.test(m)));
+		assert.ok(messages.some((m) => /decoding 1 image/.test(m)));
+		assert.ok(messages.some((m) => /writing artifacts/.test(m)));
+		// The wait is the part that reads as a hang, so it must name its own limit.
+		assert.ok(messages.some((m) => /timeout 600s/.test(m)), "must state the timeout");
+	});
+
+	it("keeps reporting while the upstream request blocks", async (t) => {
+		const cwd = await workspace();
+		// Only the interval is mocked, so the real timeout timer and I/O still work.
+		t.mock.timers.enable({ apis: ["setInterval"] });
+
+		let releaseRequest = () => {};
+		const gate = new Promise<void>((resolve) => {
+			releaseRequest = resolve;
+		});
+		let markStarted = () => {};
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+
+		const { impl } = stubFetch(async () => {
+			markStarted();
+			await gate;
+			return okImageResponse(1);
+		});
+
+		const messages: string[] = [];
+		const pending = generateMingImage({
+			task: "design",
+			prompt: "a calm hero",
+			cwd,
+			fetchImpl: impl,
+			onProgress: (message) => messages.push(message),
+			...token,
+		});
+
+		await started;
+		const before = messages.length;
+		t.mock.timers.tick(30_000);
+
+		const heartbeats = messages.slice(before).filter((m) => /generating on OpenRouter/.test(m));
+		assert.equal(heartbeats.length, 3, "expected a heartbeat every 10s while blocked");
+		assert.match(heartbeats[2], /30s elapsed/);
+
+		releaseRequest();
+		await pending;
+
+		const after = messages.length;
+		t.mock.timers.tick(60_000);
+		assert.equal(messages.length, after, "the heartbeat must stop once the request settles");
 	});
 });

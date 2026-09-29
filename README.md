@@ -17,20 +17,16 @@ registered as chat models, so they do not appear in Pi's model list.
 
 ## Install
 
-Install the tagged GitHub release globally (writes `~/.pi/agent/settings.json`):
+Install the matching tagged GitHub release globally (writes `~/.pi/agent/settings.json`):
 
 ```bash
-pi install git:github.com/Chasen-Liao/pi-ming-image@v0.1.0
+pi install git:github.com/Chasen-Liao/pi-ming-image@v0.1.1
 ```
 
-Add `-l` to install for a project instead (writes `.pi/settings.json`, relative to
-that project). From the root of a local checkout, you can install by path:
+The package is **not on npm yet** — `pi install npm:pi-ming-image` will 404 until it is
+published. The `files` and `license` fields in `package.json` are in place for that step.
 
-```bash
-pi install . -l
-```
-
-To try that checkout for a single run without changing settings:
+To try a local checkout without changing settings:
 
 ```bash
 pi -e .
@@ -93,16 +89,35 @@ directory**, not the package:
 ```text
 artifacts/design-20260928-172150/
 ├── design_01.png
+├── previews/
+│   └── design_01.png
 └── manifest.json
 ```
 
 Each run gets a unique directory, allocated atomically so concurrent runs cannot collide.
 The manifest records the task, model, prompt, input image path, actual output files,
-elapsed time, and allowlisted numeric usage statistics (`prompt_tokens`, `completion_tokens`,
-`total_tokens`, `cost`) when present. Other upstream `usage` fields are discarded; the
-manifest does not persist reflected tokens, image base64, or raw upstream error bodies.
+preview files, elapsed time, and allowlisted numeric usage statistics (`prompt_tokens`,
+`completion_tokens`, `total_tokens`, `cost`) when present. Other upstream `usage` fields
+are discarded; the manifest does not persist reflected tokens, image base64, or raw
+upstream error bodies.
 
 A failed or cancelled run removes its directory rather than leaving partial output.
+
+### Previews
+
+`previews/` holds a downscaled copy of each PNG, capped at 512 px on the long edge and
+400 KB encoded, and skipped when it would not actually be smaller than the source. The
+tool result and the tool description both point the agent at these files.
+
+The reason is context cost: reading a full-resolution layer injects megabytes of base64
+that are then resent with every later request in the session, which is what makes a
+design session feel like it has stalled. A measured 1400×900 layer went from 1.09 MB to
+172 KB. The full-resolution files remain the source of truth for downstream editing.
+
+Previews live in a subdirectory so that a non-recursive `layer_*.png` glob — the shape
+the `ling-ui-design` skill scripts use — never picks one up in place of a real layer.
+Previews are written on a best-effort basis: an image that cannot be previewed still
+produces a complete run, since the generation has already been billed.
 
 ## Known limits
 
@@ -114,6 +129,9 @@ A failed or cancelled run removes its directory rather than leaving partial outp
   honoured. Check the output size before assuming the layers align with the source.
 - **No automatic retry.** A retry could silently duplicate a billable generation, so
   the request is sent once.
+- **A generation is silent upstream.** The model gets no partial results, so the wait is
+  reported as elapsed time rather than progress. The tool streams a stage update at
+  start, then a heartbeat every 10 s naming the 10-minute ceiling.
 - **No size or aspect ratio control.** The request shape matches what the model accepts;
   neither task sends `size` or `aspect_ratio`.
 - **Request timeout is 10 minutes.** A timeout is reported as a timeout, not a success.
@@ -122,6 +140,10 @@ A failed or cancelled run removes its directory rather than leaving partial outp
 - Input and returned images receive container-structure checks (PNG chunks/CRC, JPEG
   markers, WebP RIFF/chunks). This is **not** a full pixel decode; inspect outputs.
 - A returned image is capped at 64 MB, a response at 128 MB, and output at 16 images.
+- **Previews are PNG only.** The bundled downscaler is written on `node:zlib` and does not
+  carry a JPEG or WebP decoder, so those outputs get no preview. OpenRouter returns PNG
+  for this model in practice, but a JPEG or WebP response would leave only the full-size
+  file.
 
 ## Measured behaviour
 
@@ -168,8 +190,15 @@ npm test
 The suite stubs HTTP and credentials, and covers request shape for both tasks, command
 argument parsing (including quoted paths), tool argument validation, output directory
 concurrency, manifest redaction, error codes (402, 429, auth, empty, malformed, oversized),
-cancellation, cleanup of partial output, and the extension module itself driven through a
-stub `ExtensionAPI`.
+cancellation, cleanup of partial output, progress reporting, and the extension module
+itself driven through a stub `ExtensionAPI`.
+
+`test/png.test.ts` pins the preview codec. Its PNG fixtures were produced by an
+independent encoder rather than by the one under test — a round trip through our own
+`encodePng` would pass even if both halves shared the same wrong assumption. During
+development the decoder was additionally cross-checked against Pillow on RGBA, RGB,
+palette-with-`tRNS`, 16-bit grayscale, and gray+alpha inputs, all pixel-identical after
+a round trip.
 
 Nothing in the test suite performs a real network request.
 
@@ -196,12 +225,13 @@ extensions/index.ts   registers /ming-image and generate_ming_image
 lib/generate.ts       the single shared path both entry points call
 lib/openrouter.ts     request shape, timeouts, error mapping
 lib/validate.ts       prompt and image validation, format sniffing by magic bytes
-lib/artifacts.ts      output directory allocation, writing, manifest
+lib/artifacts.ts      output directory allocation, writing, previews, manifest
 lib/command-args.ts   /ming-image argument parsing
+lib/png.ts            PNG decode/resize/encode for previews, on node:zlib only
 test/                 unit tests
 ```
 
 ## License
 
-[MIT](LICENSE). This repository has a GitHub release; `private: true` in `package.json`
-prevents accidental npm publication and does not restrict use under the MIT license.
+[MIT](LICENSE). Available as a tagged GitHub release. npm publication is prepared
+(`package.json` carries `license`, `repository`, and `files`) but has not happened yet.

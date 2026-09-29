@@ -29,6 +29,18 @@ export const MAX_ERROR_BODY_BYTES = 64 * 1024;
 /** Design took ~59 s locally; layer decomposition is slower, so allow 10 minutes. */
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
+/**
+ * Preview bounds. Reading a full-resolution layer into the model costs megabytes
+ * of base64 that are then resent with every request, which is what makes a design
+ * session appear to stall. Previews exist so the model can look at a layer
+ * cheaply; the full-resolution file stays the source of truth for editing.
+ */
+export const PREVIEW_MAX_DIMENSION = 512;
+export const PREVIEW_MAX_BYTES = 400 * 1024;
+export const PREVIEW_MIN_DIMENSION = 96;
+/** Previews live in a subdirectory so a `layer_*.png` glob never matches them. */
+export const PREVIEW_DIRNAME = "previews";
+
 export type ImageMime = "image/png" | "image/jpeg" | "image/webp";
 
 export const INPUT_IMAGE_EXTENSIONS: Record<string, ImageMime> = {
@@ -60,6 +72,8 @@ export type RunManifest = {
 	input_image?: string;
 	input_image_bytes?: number;
 	output_files: string[];
+	/** Preview copies, relative to the run directory. Empty when none could be made. */
+	preview_files: string[];
 	elapsed_seconds: number;
 	usage?: UsageSummary;
 	created_at: string;

@@ -14,6 +14,7 @@ import { after, describe, it } from "node:test";
 
 import mingImageExtension from "../extensions/index.ts";
 import { USAGE } from "../lib/command-args.ts";
+import { photoPng } from "./fixtures.ts";
 
 const PNG_1X1 = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
@@ -88,11 +89,14 @@ function okImageResponse(count = 1) {
 	);
 }
 
-function stubFetch() {
+function stubFetch(payload: Buffer = PNG_1X1) {
 	const calls: { url: string; body: any }[] = [];
 	const impl = (async (url: string | URL | Request, init?: RequestInit) => {
 		calls.push({ url: String(url), body: JSON.parse(String(init?.body ?? "{}")) });
-		return okImageResponse(1);
+		return new Response(JSON.stringify({ data: [{ b64_json: payload.toString("base64") }] }), {
+			status: 200,
+			headers: { "Content-Type": "application/json" },
+		});
 	}) as unknown as typeof fetch;
 	return { impl, calls };
 }
@@ -125,6 +129,15 @@ describe("extension registration", () => {
 		assert.match(tool.description, /imagePath/);
 	});
 
+	it("tells the model to read previews, not the full-size files", () => {
+		const tool = makeHost({ cwd: "C:/nowhere" }).tools.get("generate_ming_image");
+		assert.ok(tool);
+		// Reading a full-resolution layer costs megabytes of base64 per image and
+		// those bytes are resent with every later request, which is the stall.
+		assert.match(tool.description, /previews/);
+		assert.match(tool.description, /context/i);
+	});
+
 	it("registers nothing extra", () => {
 		const host = makeHost({ cwd: "C:/nowhere" });
 		assert.deepEqual([...host.commands.keys()], ["ming-image"]);
@@ -150,10 +163,18 @@ describe("/ming-image command", () => {
 		assert.equal(calls[0].body.model, "inclusionai/ming-image-0.1-design");
 		assert.equal(calls[0].body.prompt, "a calm hero");
 
-		const success = host.notices.find((n) => n.level === "success");
-		assert.ok(success, "expected a success notification");
+		// ctx.ui.notify only accepts info | warning | error, so a finished run
+		// reports as info rather than a level Pi would reject.
+		const success = host.notices.filter((n) => /image\(s\)/.test(n.message)).at(-1);
+		assert.ok(success, "expected a completion notification");
+		assert.equal(success.level, "info");
 		assert.match(success.message, /1 image\(s\)/);
 		assert.match(success.message, /manifest:/);
+		// Progress must reach the user before the run finishes.
+		assert.ok(
+			host.notices.some((n) => /validating input/.test(n.message)),
+			"expected stage progress notifications",
+		);
 
 		const dir = path.join(cwd, "artifacts");
 		const run = (await import("node:fs/promises")).readdir(dir);
@@ -251,6 +272,32 @@ describe("generate_ming_image tool", () => {
 		assert.ok(calls[0].body.input_references[0].image_url.url.startsWith("data:image/png;base64,"));
 	});
 
+	it("points the model at the small preview in the text it actually reads", async () => {
+		const cwd = await workspace();
+		const host = makeHost({ cwd });
+		const { impl } = stubFetch(photoPng());
+		const original = globalThis.fetch;
+		globalThis.fetch = impl;
+		let result: Awaited<ReturnType<RegisteredTool["execute"]>>;
+		try {
+			result = await host.tools
+				.get("generate_ming_image")!
+				.execute("call-4", { task: "design", prompt: "a calm hero" }, undefined, undefined, host.ctx);
+		} finally {
+			globalThis.fetch = original;
+		}
+
+		// The whole point is that the model is sent somewhere cheap to look.
+		const text = result.content.map((c) => c.text).join("\n");
+		assert.match(text, /previews[\\/]design_01\.png/);
+
+		const details = result.details as { previewFiles: string[]; outputDir: string };
+		assert.deepEqual(details.previewFiles, ["previews/design_01.png"]);
+		const onDisk = await readFile(path.join(details.outputDir, "previews", "design_01.png"));
+		const full = await readFile(path.join(details.outputDir, "design_01.png"));
+		assert.ok(onDisk.length * 2 < full.length, `preview ${onDisk.length}B vs full ${full.length}B`);
+	});
+
 	it("validates arguments before spending a request", async () => {
 		const cwd = await workspace();
 		const host = makeHost({ cwd });
@@ -268,5 +315,45 @@ describe("generate_ming_image tool", () => {
 		}
 		globalThis.fetch = original;
 		assert.equal(calls.length, 0);
+	});
+
+	it("streams stage updates so the wait is never silent", async () => {
+		const cwd = await workspace();
+		const host = makeHost({ cwd });
+		// Hold the response open so the update stream is observed mid-flight.
+		let release = () => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const impl = (async () => {
+			await gate;
+			return okImageResponse(1);
+		}) as unknown as typeof fetch;
+
+		const updates: string[] = [];
+		const original = globalThis.fetch;
+		globalThis.fetch = impl;
+		const pending = host.tools
+			.get("generate_ming_image")!
+			.execute(
+				"call-3",
+				{ task: "design", prompt: "a calm hero" },
+				undefined,
+				(partial: { content: { text: string }[] }) => updates.push(partial.content[0].text),
+				host.ctx,
+			);
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			assert.ok(updates.length > 0, "expected progress before the request resolved");
+			release();
+			const result = await pending;
+			assert.ok(updates.length >= 2);
+			assert.match(updates[0], /validating input/);
+			// The ceiling must be visible up front, not only once a heartbeat fires.
+			assert.ok(updates.some((u) => /timeout 600s/.test(u)), `no timeout in ${JSON.stringify(updates)}`);
+			assert.match(result.content.map((c) => c.text).join("\n"), /1 image\(s\)/);
+		} finally {
+			globalThis.fetch = original;
+		}
 	});
 });
